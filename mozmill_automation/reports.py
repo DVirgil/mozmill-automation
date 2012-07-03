@@ -47,11 +47,15 @@ class DashboardReport(Report):
 
         # Endurance Testrun
         if isinstance(self.testrun, testrun.EnduranceTestRun):
-            self.get_endurance_results(report, results)
+            self.get_endurance_results(report)
+
+        # Update Testrun
+        if isinstance(self.testrun, testrun.UpdateTestRun):
+            self.get_update_results(report)
 
         return report
 
-    def get_endurance_results(self, report, results):
+    def get_endurance_results(self, report):
         blacklist = ('timestamp', 'label')
         metrics = []
 
@@ -80,3 +84,6 @@ class DashboardReport(Report):
             report['endurance']['stats'] = self._calculate_endurance_stats(all_metrics, metrics)
 
         return report
+
+    def get_update_results(self, report):
+        report['updates'] = self.testrun._mozmill.persisted['updates']

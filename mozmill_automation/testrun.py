@@ -4,6 +4,7 @@
 
 import os
 import optparse
+import shutil
 import sys
 import tempfile
 import traceback
@@ -141,6 +142,22 @@ class TestRun(object):
             else:
                 self.addon_list.append(addon)
 
+    def prepare_application(self, binary):
+        # Prepare the binary for the test run
+        if mozinstall.is_installer(binary):
+            install_path = tempfile.mkdtemp(".binary")
+
+            print "Install build: %s" % binary
+            self._folder = mozinstall.install(binary, install_path)
+            self._application = mozinstall.get_binary(self._folder,
+                                                      self.options.application)
+        else:
+            # TODO: Ensure that self._folder is the same as from mozinstall
+            folder = os.path.dirname(binary)
+            self._folder = folder if not os.path.isdir(binary) else binary
+            self._application = binary
+
+
     def graphics_event(self, obj):
         if not self.graphics:
             self.graphics = obj
@@ -186,19 +203,7 @@ class TestRun(object):
             self.prepare_addons()
 
         try:
-            # Prepare the binary for the test run
-            if mozinstall.is_installer(self.binary):
-                install_path = tempfile.mkdtemp(".binary")
-    
-                print "Install build: %s" % self.binary
-                self._folder = mozinstall.install(self.binary, install_path)
-                self._application = mozinstall.get_binary(self._folder,
-                                                          self.options.application)
-            else:
-                # TODO: Ensure that self._folder is the same as from mozinstall
-                folder = os.path.dirname(self.binary)
-                self._folder = folder if not os.path.isdir(self.binary) else self.binary
-                self._application = self.binary
+            self.prepare_application(self.binary)
 
             # Prepare the repository
             ini = application.ApplicationIni(self._application)
@@ -394,6 +399,101 @@ class RemoteTestRun(TestRun):
         TestRun.run_tests(self)
 
 
+class UpdateTestRun(TestRun):
+    """ Class to execute software update tests """
+
+    report_type = "firefox-update"
+    report_version = "1.0"
+
+    def __init__(self, *args, **kwargs):
+        TestRun.__init__(self, *args, **kwargs)
+        self.options.restart = True
+
+        self.results = [ ]
+
+        # Download of updates normally take longer than 60 seconds
+        # Soft-timeout is 360s so make the hard-kill timeout 5s longer
+        self.timeout = 365
+
+    def add_options(self, parser):
+        update = optparse.OptionGroup(parser, "Update options")
+        update.add_option("--channel",
+                          dest="channel",
+                          choices=application.UPDATE_CHANNELS,
+                          metavar="CHANNEL",
+                          help="update channel")
+        update.add_option("--no-fallback",
+                          dest="no_fallback",
+                          default=False,
+                          action="store_true",
+                          help="do not perform a fallback update")
+        update.add_option("--target-buildid",
+                          dest="target_buildid",
+                          metavar="TARGET_ID",
+                          help="expected build id of the updated build")
+        parser.add_option_group(update)
+
+        TestRun.add_options(self, parser)
+
+    def prepare_application(self, binary):
+        TestRun.prepare_application(self, binary)
+
+        # If a fallback update has to be performed, create a second copy
+        # of the application to avoid running the installer twice
+        if not self.options.no_fallback:
+            self._backup_folder = tempfile.mkdtemp(".binary_backup")
+
+            print "Create backup: %s" % self._backup_folder
+            shutil.rmtree(self._backup_folder)
+            shutil.copytree(self._folder, self._backup_folder)
+
+    def prepare_channel(self):
+        update_channel = application.UpdateChannel(self._application)
+
+        if self.options.channel is None:
+            self.channel = update_channel.channel
+        else:
+            update_channel.channel = self.options.channel
+            self.channel = self.options.channel
+
+    def restore_binary(self):
+        """ Restores the backup of the application binary. """
+
+        print "Restore backup: %s" % self._backup_folder
+        shutil.rmtree(self._folder)
+        shutil.move(self._backup_folder, self._folder)
+
+    def run_tests(self):
+        """ Start the execution of the tests. """
+
+        self.prepare_channel()
+
+        self._mozmill.persisted["channel"] = self.channel
+        if self.options.target_buildid:
+            self._mozmill.persisted["targetBuildID"] = self.options.target_buildid
+
+        # Run direct update test
+        self.run_update_tests(False)
+
+        # Run fallback update test
+        if not self.options.no_fallback:
+            # Restoring application backup to run direct update tests
+            self.restore_binary()
+
+            self.run_update_tests(True)
+
+    def run_update_tests(self, is_fallback):
+        try:
+            type = 'testFallbackUpdate' if is_fallback else 'testDirectUpdate'
+            self.manifest_path = os.path.join('tests',
+                                              'update',
+                                              type,
+                                              'manifest.ini')
+            TestRun.run_tests(self)
+        except Exception, e:
+            print "Execution of test-run aborted: %s" % str(e)
+
+
 def exec_testrun(cls):
     try:
         cls().run()
@@ -415,3 +515,7 @@ def l10n_cli():
 
 def remote_cli():
     exec_testrun(RemoteTestRun)
+
+
+def update_cli():
+    exec_testrun(UpdateTestRun)
